@@ -421,10 +421,11 @@ public class TestSwiftFileSystemPartitionedUploads extends
     String partOneName = SwiftUtils.partitionFilenameFromNumber(1);
     Path srcPart = new Path(src, partOneName);
     Path dest = new Path("/test/testRenamePartitionedFileDest");
-    Path destPart = new Path(src, partOneName);
+    Path destPart = new Path(dest, partOneName);
     assertExists("Partition Exists", srcPart);
     fs.rename(src, dest);
     assertPathExists(fs, "dest file missing", dest);
+    assertPathExists(fs, "dest no longer partitioned", destPart);
     FileStatus status = fs.getFileStatus(dest);
     assertEquals("Length of renamed file is wrong", len, status.getLen());
     byte[] destData = readDataset(fs, dest, len);

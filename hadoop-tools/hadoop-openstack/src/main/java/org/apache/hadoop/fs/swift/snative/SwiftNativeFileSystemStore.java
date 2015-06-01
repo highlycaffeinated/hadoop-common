@@ -155,7 +155,12 @@ public class SwiftNativeFileSystemStore {
    * @throws IOException
    */
   public void createManifestForPartUpload(Path path) throws IOException {
-    String pathString = toObjectPath(path).toString();
+    createManifestForPartUpload(toObjectPath(path));
+  }
+
+  private void createManifestForPartUpload(SwiftObjectPath objectPath)
+      throws IOException {
+    String pathString = objectPath.toString();
     if (!pathString.endsWith("/")) {
       pathString = pathString.concat("/");
     }
@@ -163,7 +168,7 @@ public class SwiftNativeFileSystemStore {
       pathString = pathString.substring(1);
     }
 
-    swiftRestClient.upload(toObjectPath(path),
+    swiftRestClient.upload(objectPath,
             new ByteArrayInputStream(new byte[0]),
             0,
             new Header(SwiftProtocolConstants.X_OBJECT_MANIFEST, pathString));
@@ -614,12 +619,16 @@ public class SwiftNativeFileSystemStore {
         SwiftUtils.debug(LOG, "Source file appears to be partitioned." +
                               " copying file and deleting children");
 
-        copyObject(srcObject, destPath);
         for (FileStatus stat : childStats) {
-          SwiftUtils.debug(LOG, "Deleting partitioned file %s ", stat);
+          String suffix = stat.getPath().getName();
+          SwiftObjectPath srcPart = new SwiftObjectPath(srcObject.getContainer(), srcObject.getObject() + "/" + suffix);
+          SwiftObjectPath destPart = new SwiftObjectPath(destPath.getContainer(), destPath.getObject() + "/" + suffix);
+          SwiftUtils.debug(LOG, "Copying partion from %s to %s ", srcPart, destPart);
+          copyObject(srcPart, destPart);
+          SwiftUtils.debug(LOG, "Deleting source partition %s ", stat);
           deleteObject(stat.getPath());
         }
-
+        createManifestForPartUpload(destPath);
         swiftRestClient.delete(srcObject);
       }
     } else {
