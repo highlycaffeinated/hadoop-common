@@ -295,6 +295,22 @@ public class SwiftNativeFileSystemStore {
     return swiftRestClient.getData(
       toObjectPath(path), byteRangeStart, length);
   }
+  
+  private boolean hasChildren(SwiftObjectPath path) {
+    try {
+      final byte[] bytes = swiftRestClient.listDeepObjectsInDirectory(path, true);
+
+      final CollectionType collectionType = JSONUtil.getJsonMapper().getTypeFactory().
+          constructCollectionType(List.class, SwiftObjectFileStatus.class);
+
+      final List<SwiftObjectFileStatus> fileStatusList =
+          JSONUtil.toObject(new String(bytes), collectionType);
+
+      return !fileStatusList.isEmpty();
+    } catch (Exception e) {
+      return false;
+    }
+  }
 
   /**
    * List a directory.
@@ -608,31 +624,15 @@ public class SwiftNativeFileSystemStore {
         //outcome #3 -new entry
         destPath = toObjectPath(dst);
       }
-      int childCount = childStats.size();
       //here there is one of:
       // - a single object ==> standard file
       // ->
-      if (childCount == 0) {
-        copyThenDeleteObject(srcObject, destPath);
+      if (hasChildren(srcObject)) {
+        movePartitionedFile(srcObject, destPath, childStats);
       } else {
-        //do the copy
-        SwiftUtils.debug(LOG, "Source file appears to be partitioned." +
-                              " copying file and deleting children");
-
-        for (FileStatus stat : childStats) {
-          String suffix = stat.getPath().getName();
-          SwiftObjectPath srcPart = new SwiftObjectPath(srcObject.getContainer(), srcObject.getObject() + "/" + suffix);
-          SwiftObjectPath destPart = new SwiftObjectPath(destPath.getContainer(), destPath.getObject() + "/" + suffix);
-          SwiftUtils.debug(LOG, "Copying partion from %s to %s ", srcPart, destPart);
-          copyObject(srcPart, destPart);
-          SwiftUtils.debug(LOG, "Deleting source partition %s ", stat);
-          deleteObject(stat.getPath());
-        }
-        createManifestForPartUpload(destPath);
-        swiftRestClient.delete(srcObject);
+        copyThenDeleteObject(srcObject, destPath);
       }
     } else {
-
       //here the source exists and is a directory
       // outcomes (given we know the parent dir exists if we get this far)
       // #1 destination is a file: fail
@@ -667,38 +667,7 @@ public class SwiftNativeFileSystemStore {
 
       logDirectory("Directory to copy ", srcObject, childStats);
 
-      // iterative copy of everything under the directory.
-      // by listing all children this can be done iteratively
-      // rather than recursively -everything in this list is either a file
-      // or a 0-byte-len file pretending to be a directory.
-      String srcURI = src.toUri().toString();
-      int prefixStripCount = srcURI.length() + 1;
-      for (FileStatus fileStatus : childStats) {
-        Path copySourcePath = fileStatus.getPath();
-        String copySourceURI = copySourcePath.toUri().toString();
-
-        String copyDestSubPath = copySourceURI.substring(prefixStripCount);
-
-        Path copyDestPath = new Path(targetPath, copyDestSubPath);
-        if (LOG.isTraceEnabled()) {
-          //trace to debug some low-level rename path problems; retained
-          //in case they ever come back.
-          LOG.trace("srcURI=" + srcURI
-                  + "; copySourceURI=" + copySourceURI
-                  + "; copyDestSubPath=" + copyDestSubPath
-                  + "; copyDestPath=" + copyDestPath);
-        }
-        SwiftObjectPath copyDestination = toObjectPath(copyDestPath);
-
-        try {
-          copyThenDeleteObject(toObjectPath(copySourcePath),
-                  copyDestination);
-        } catch (FileNotFoundException e) {
-          LOG.info("Skipping rename of " + copySourcePath);
-        }
-        //add a throttle delay
-        throttle();
-      }
+      copyDirectoryContents(src, childStats, targetPath);
       //now rename self. If missing, create the dest directory and warn
       if (!SwiftUtils.isRootDir(srcObject)) {
         try {
@@ -711,6 +680,66 @@ public class SwiftNativeFileSystemStore {
         }
       }
     }
+  }
+
+  private void copyDirectoryContents(Path src, List<FileStatus> childStats,
+      Path targetPath) throws SwiftConfigurationException, IOException,
+      InterruptedIOException {
+    // iterative copy of everything under the directory.
+    // by listing all children this can be done iteratively
+    // rather than recursively -everything in this list is either a file
+    // or a 0-byte-len file pretending to be a directory.
+    String srcURI = src.toUri().toString();
+    int prefixStripCount = srcURI.length() + 1;
+    for (FileStatus fileStatus : childStats) {
+      Path copySourcePath = fileStatus.getPath();
+      String copySourceURI = copySourcePath.toUri().toString();
+
+      String copyDestSubPath = copySourceURI.substring(prefixStripCount);
+
+      Path copyDestPath = new Path(targetPath, copyDestSubPath);
+      if (LOG.isTraceEnabled()) {
+        //trace to debug some low-level rename path problems; retained
+        //in case they ever come back.
+        LOG.trace("srcURI=" + srcURI
+                + "; copySourceURI=" + copySourceURI
+                + "; copyDestSubPath=" + copyDestSubPath
+                + "; copyDestPath=" + copyDestPath);
+      }
+      SwiftObjectPath copyDestination = toObjectPath(copyDestPath);
+
+      try {
+        copyThenDeleteObject(toObjectPath(copySourcePath),
+                copyDestination);
+      } catch (FileNotFoundException e) {
+        LOG.info("Skipping rename of " + copySourcePath);
+      }
+      //add a throttle delay
+      throttle();
+    }
+  }
+
+  private void movePartitionedFile(SwiftObjectPath srcObject,
+      SwiftObjectPath destPath, List<FileStatus> childStats)
+          throws IOException {
+    //do the copy
+    SwiftUtils.debug(LOG, "Source file appears to be partitioned." +
+                          " copying file and deleting children");
+
+    for (FileStatus stat : childStats) {
+      String suffix = stat.getPath().getName();
+      SwiftObjectPath srcPart = new SwiftObjectPath(
+          srcObject.getContainer(), srcObject.getObject() + "/" + suffix);
+      SwiftObjectPath destPart = new SwiftObjectPath(
+          destPath.getContainer(), destPath.getObject() + "/" + suffix);
+      SwiftUtils.debug(LOG, "Copying partion from %s to %s ", srcPart,
+          destPart);
+      copyObject(srcPart, destPart);
+      SwiftUtils.debug(LOG, "Deleting source partition %s ", stat);
+      deleteObject(stat.getPath());
+    }
+    createManifestForPartUpload(destPath);
+    swiftRestClient.delete(srcObject);
   }
 
   /**
